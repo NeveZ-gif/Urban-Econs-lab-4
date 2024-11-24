@@ -1,0 +1,818 @@
+---
+title: "Lab 4 - Greater Portland Labor Markets"
+author: "Neve Zhang"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    keep_md: yes
+    toc: yes
+    theme: flatly
+    toc_float: yes
+    code_folding: hide
+    number_sections: no
+  pdf_document:
+    toc: yes
+---
+
+<style>
+.kable thead tr th, .table thead tr th {
+  text-align: left !important;}
+table.kable, table.table {
+  width: 100% !important;}
+  body {
+  line-height: 1.6;
+  font-size: 16px
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  cache = TRUE,
+  dpi = 150)
+options(scipen = 999)
+
+if(!require(pacman)){install.packages("pacman"); library(pacman)}
+p_load(tidycensus, dplyr, ggplot2, hrbrthemes, openxlsx, stringr, tidyr, kableExtra)
+census_api_key("21324bfab754fd2d816f5121673a251849675235", overwrite = TRUE, install=TRUE)
+```
+
+# Introduction
+
+The following lab taps into various data sources published by US Census Bureau, Bureau of Labor Statistics, and local agencies (State of Oregon Employment Department) to understand unemployment patterns, regional wage premiums, change in employment trends, and job projections. 
+
+# Unemployment Analysis
+
+The following unemployment pattern analysis is conducted using the 2017-2022 5-Year American Community Survey data.
+
+To obtain a more accurate calculation of unemployment rate within the four-county Greater Portland region, a detailed process is undertaken to calculate total population in labor force, marginal errors (MOEs) of total population in labor force, total population unemployed, and MOEs of total population unemployed for each county, leveraging estimates and moes of total population, labor participation rate, and unemployment rate from subject table S2301. The following formulas were used:
+
+- Total population in labor force of each county = total population * labor participation rate
+
+- MOE of labor force population of each county = labor_population * sqrt((moe_total / estimate_total)^2 + (moe_labor / estimate_labor)^2 + (moe_un / estimate_un)^2
+
+- Total unemployment population of each county = total population * labor participation rate * unemployment rate
+
+- MOE of unemployment population of each county =  unemployed_population * sqrt((moe_total / estimate_total)^2 + (moe_labor / estimate_labor)^2 + (moe_un / estimate_un)^2
+
+These results are then input into calculation of total population in labor force, marginal errors (MOEs) of total population in labor force, total population unemployed, and MOEs of total population unemployed for the Greater Portland region, hence deriving granular estimate and MOEs of unemployment rate at the four-county scale.
+
+## Preparing Unemployment Data by Race
+
+Eight race/ethnicity categories were defined and studied, including:
+
+- White, non-Hispanic/Latino
+
+- Black, non-Hispanic/Latino
+
+- American Indian, non-Hispanic/Latino
+
+- Asian, non-Hispanic/Latino
+
+- Native Hawaiian, non-Hispanic/Latino
+
+- Other Races, non-Hispanic/Latino
+
+- Two or More Races, non-Hispanic/Latino
+
+- Hispanic/Latinx
+
+```{r get unemployment data by race}
+# Get county data
+emp_status_race_county <- get_acs(geography = "county",
+                      year = 2022,
+                      variables = c("White NH_total"="S2301_C01_012", #get total
+                                    "Black NH_total"="S2301_C01_013", 
+                                    "Amer. Indian NH_total" = "S2301_C01_014",
+                                    "Asian NH_total" = "S2301_C01_015",
+                                    "Native Hawaiian NH_total" = "S2301_C01_016",
+                                    "Other NH_total" = "S2301_C01_017",
+                                    "Two or more NH_total" = "S2301_C01_018",
+                                    "Hispanic/Latinx_total" = "S2301_C01_019",
+                                    "White NH_labor"="S2301_C02_012", #get labor
+                                    "Black NH_labor"="S2301_C02_013", 
+                                    "Amer. Indian NH_labor" = "S2301_C02_014",
+                                    "Asian NH_labor" = "S2301_C02_015",
+                                    "Native Hawaiian NH_labor" = "S2301_C02_016",
+                                    "Other NH_labor" = "S2301_C02_017",
+                                    "Two or more NH_labor" = "S2301_C02_018",
+                                    "Hispanic/Latinx_labor" = "S2301_C02_019",
+                                    "White NH_un"="S2301_C04_012", #get unemployment rate
+                                    "Black NH_un"="S2301_C04_013", 
+                                    "Amer. Indian NH_un" = "S2301_C04_014",
+                                    "Asian NH_un" = "S2301_C04_015",
+                                    "Native Hawaiian NH_un" = "S2301_C04_016",
+                                    "Other NH_un" = "S2301_C04_017",
+                                    "Two or more NH_un" = "S2301_C04_018",
+                                    "Hispanic/Latinx_un" = "S2301_C04_019"))
+                            
+# clean the dataframe
+emp_status_race_GP <- emp_status_race_county %>%
+  filter(GEOID %in% c("41005", "41051", "41067", "53011")) %>% 
+  separate(variable, into = c("race_ethnicity", "measure"), sep = "_", remove = FALSE) %>% 
+  select(-variable)
+
+# reshape data to wide format for each GEOID and education_level combination
+emp_status_race_GP <- emp_status_race_GP %>%
+  pivot_wider(
+    names_from = measure,             
+    values_from = c(estimate, moe),   
+    names_sep = "_"                   
+  )
+
+emp_status_race_GP <- emp_status_race_GP %>% 
+  mutate(estimate_labor = estimate_labor / 100,
+         moe_labor = moe_labor / 100,
+         estimate_un = estimate_un / 100,
+         moe_un = moe_un / 100)
+
+# aggregate count and moe by county
+emp_status_race_GP <- emp_status_race_GP %>%
+  rowwise() %>%
+  mutate(
+    labor_population = estimate_total * estimate_labor,
+    moe_laborpop = labor_population * sqrt(
+      (moe_total / estimate_total)^2 +
+      (moe_labor / estimate_labor)^2),
+    unemployed_population = estimate_total * estimate_labor * estimate_un,
+    moe_unemployed = unemployed_population * sqrt(
+      (moe_total / estimate_total)^2 +
+      (moe_labor / estimate_labor)^2 +
+      (moe_un / estimate_un)^2
+    )
+  ) %>%
+  ungroup()
+
+# calculate greater portland unemployed population and moe
+emp_status_race_GP <- emp_status_race_GP %>%
+  group_by(race_ethnicity) %>% 
+  summarize(
+    estimate_labor = sum(labor_population),
+    moe_labor = sqrt(sum(moe_laborpop^2)),  # Pooled MOE
+    estimate_unemployed = sum(unemployed_population),
+    moe_unemployed = sqrt(sum(moe_unemployed^2))  # Pooled MOE
+  ) %>% 
+  mutate(NAME = "Greater Portland")
+
+# calculating unemployment rate and moe
+emp_status_race_GP <- emp_status_race_GP %>%
+  mutate(
+    estimate = estimate_unemployed / estimate_labor*100,
+    moe = estimate * sqrt(
+      (moe_unemployed / estimate_unemployed)^2 +
+      (moe_labor / estimate_labor)^2
+    )
+  )
+
+# Get national data
+emp_status_race_us <- get_acs(geography = "us",
+                      year = 2022,
+                      variables = c("White NH" = "S2301_C04_012",
+                      "Black NH" = "S2301_C04_013",
+                      "Amer. Indian NH" = "S2301_C04_014",
+                      "Asian NH" = "S2301_C04_015",
+                      "Native Hawaiian NH" = "S2301_C04_016",
+                      "Other NH" = "S2301_C04_017",
+                      "Two or more NH" = "S2301_C04_018",
+                      "Hispanic/Latinx" = "S2301_C04_019"))%>% 
+  select(-GEOID)
+
+```
+
+## Unemployment by Education Attainment
+
+Four education categories were defined and studied, including:
+
+- Less than High School Graduate
+
+- High School Graduate or Equivalent
+
+- Some College or Associate's Degree
+
+- Bachelor's Degree or Higher
+
+```{r get unemployment data by education}
+# Get county data
+emp_status_edu_county <- get_acs(geography = "county",
+                      year = 2022,
+                      variables = c("Less than High School Graduate_total"="S2301_C01_032", 
+                                    "High School Graduate or Equivalent_total"="S2301_C01_033", 
+                                    "Some College or Associate's Degree_total"="S2301_C01_034", 
+                                    "Bachelor's Degree or Higher_total" = "S2301_C01_035",
+                                    "Less than High School Graduate_labor" = "S2301_C02_032", 
+                                    "High School Graduate or Equivalent_labor"="S2301_C02_033", 
+                                    "Some College or Associate's Degree_labor"="S2301_C02_034", 
+                                    "Bachelor's Degree or Higher_labor" = "S2301_C02_035",
+                                    "Less than High School Graduate_un" = "S2301_C04_032",
+                                    "High School Graduate or Equivalent_un" = "S2301_C04_033", 
+                                    "Some College or Associate's Degree_un"="S2301_C04_034",
+                                    "Bachelor's Degree or Higher_un" ="S2301_C04_035"))
+
+# clean the dataframe
+emp_status_edu_GP <- emp_status_edu_county %>%
+  filter(GEOID %in% c("41005", "41051", "41067", "53011")) %>% 
+  separate(variable, into = c("education_level", "measure"), sep = "_", remove = FALSE) %>% 
+  select(-variable)
+
+# Reshape data to wide format for each GEOID and education_level combination
+emp_status_edu_GP <- emp_status_edu_GP %>%
+  pivot_wider(
+    names_from = measure,               # Use the `measure` column to create new columns
+    values_from = c(estimate, moe),     # Use `estimate` and `moe` values
+    names_sep = "_"                     # Add suffix for the measure type
+  )
+
+emp_status_edu_GP <- emp_status_edu_GP %>% 
+  mutate(estimate_labor = estimate_labor / 100,
+         moe_labor = moe_labor / 100,
+         estimate_un = estimate_un / 100,
+         moe_un = moe_un / 100)
+
+# aggregate count and moe by county
+emp_status_edu_GP <- emp_status_edu_GP %>%
+  rowwise() %>%
+  mutate(
+    labor_population = estimate_total * estimate_labor,
+    moe_laborpop = labor_population * sqrt(
+      (moe_total / estimate_total)^2 +
+      (moe_labor / estimate_labor)^2),
+    unemployed_population = estimate_total * estimate_labor * estimate_un,
+    moe_unemployed = unemployed_population * sqrt(
+      (moe_total / estimate_total)^2 +
+      (moe_labor / estimate_labor)^2 +
+      (moe_un / estimate_un)^2
+    )
+  ) %>%
+  ungroup()
+
+# calculate greater portland unemployed population and moe
+emp_status_edu_GP <- emp_status_edu_GP %>%
+  group_by(education_level) %>% 
+  summarize(
+    estimate_labor = sum(labor_population),
+    moe_labor = sqrt(sum(moe_laborpop^2)),  # Pooled MOE
+    estimate_unemployed = sum(unemployed_population),
+    moe_unemployed = sqrt(sum(moe_unemployed^2))  # Pooled MOE
+  ) %>% 
+  mutate(NAME = "Greater Portland")
+
+# calculating unemployment rate and moe
+emp_status_edu_GP <- emp_status_edu_GP %>%
+  mutate(
+    estimate = estimate_unemployed / estimate_labor*100,
+    moe = estimate * sqrt(
+      (moe_unemployed / estimate_unemployed)^2 +
+      (moe_labor / estimate_labor)^2
+    )
+  )
+
+# Get national data
+emp_status_edu_us <- get_acs(geography = "us",
+                      year = 2022,
+                      variables = c("Less than High School Graduate" = "S2301_C04_032",
+                      "High School Graduate or Equivalent" = "S2301_C04_033",
+                      "Some College or Associate's Degree" = "S2301_C04_034",
+                      "Bachelor's Degree or Higher" = "S2301_C04_035")) %>% 
+  select(-GEOID)
+```
+
+```{r bind data and plotting}
+emp_status_race_us <- emp_status_race_us %>% 
+  rename(race_ethnicity = variable)
+
+emp_status_edu_us <- emp_status_edu_us %>% 
+  rename(education_level = variable)
+
+# binding and plotting race data
+emp_status_race_GP <- emp_status_race_GP %>% 
+  select(NAME, race_ethnicity, estimate, moe)
+
+emp_status_race <- emp_status_race_GP %>%
+  bind_rows(emp_status_race_us)
+
+emp_status_race$race_ethnicity <- factor(emp_status_race$race_ethnicity, 
+                                         levels = c("White NH",
+                                                    "Black NH", 
+                                                    "Amer. Indian NH",
+                                                    "Asian NH",
+                                                    "Native Hawaiian NH",
+                                                    "Other NH",
+                                                    "Two or more NH",
+                                                    "Hispanic/Latinx"))
+
+ggplot(emp_status_race, aes(race_ethnicity, estimate, fill = NAME)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Unemployment Rate by Race Ethnicity in Greater Portland, 2022", 
+       x = "Race/Ethnicity", y = "") +
+  scale_y_continuous(labels = function(x) paste0(x, "%")) +
+  geom_errorbar(aes(ymin = estimate - moe, ymax = estimate + moe),
+                width = .75, position = "dodge") +
+  coord_flip() +
+  theme_minimal() +
+  theme(legend.position = "bottom")+
+  scale_x_discrete(limits = rev(levels(emp_status_race$race_ethnicity)))
+
+# binding and plotting education data
+emp_status_edu_GP <- emp_status_edu_GP %>%
+  select(NAME, education_level, estimate, moe)
+
+emp_status_edu <- emp_status_edu_GP %>%
+  bind_rows(emp_status_edu_us)
+
+emp_status_edu$education_level <- factor(emp_status_edu$education_level, 
+                                         levels = c("Less than High School Graduate", 
+                                                    "High School Graduate or Equivalent", 
+                                                    "Some College or Associate's Degree", 
+                                                    "Bachelor's Degree or Higher"))
+
+ggplot(emp_status_edu, aes(education_level, estimate, fill = NAME)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Unemployment Rate by Education Level in Greater Portland, 2022", 
+       x = "Education Level", y = "") +
+  scale_y_continuous(labels = function(x) paste0(x, "%")) +
+  geom_errorbar(aes(ymin = estimate - moe, ymax = estimate + moe),
+                width = .75, position = "dodge") +
+  coord_flip() +
+  theme_minimal() +
+  theme(legend.position = "bottom")+
+  scale_x_discrete(limits = rev(levels(emp_status_edu$education_level)))
+```
+
+# Worker Share by Class
+
+```{r get worker class data}
+# get county data, aggregate to Greater Portland
+worker_class_county <- get_acs(geography = "county",
+                        variables = c("Total Emp." = "S2408_C01_001",
+                                      "Private, for-profit" = "S2408_C01_002",
+                                      "Private, not-for-profit" = "S2408_C01_005",
+                                      "Local Gov." = "S2408_C01_006",
+                                      "State Gov." = "S2408_C01_007",
+                                      "Federal" = "S2408_C01_008",
+                                      "Self Employed" = "S2408_C01_009"),
+                        year = 2022)
+
+worker_class_GP <- worker_class_county %>%
+  filter(GEOID %in% c("41005", "41051", "41067", "53011")) %>% 
+  group_by(variable) %>% 
+  summarize(
+    estimate = sum(estimate),
+    moe = sqrt(sum(moe^2))  # Pooled MOE
+  ) %>% 
+  mutate(NAME = "Greater Portland")
+
+worker_class_GP <- worker_class_GP %>%
+  mutate(class_share = estimate/1213877)
+
+# get national data
+worker_class_us <- get_acs(geography = "us",
+                        variables = c("Total Emp." = "S2408_C01_001",
+                                      "Private, for-profit" = "S2408_C01_002",
+                                      "Private, not-for-profit" = "S2408_C01_005",
+                                      "Local Gov." = "S2408_C01_006",
+                                      "State Gov." = "S2408_C01_007",
+                                      "Federal" = "S2408_C01_008",
+                                      "Self Employed" = "S2408_C01_009"),
+                        year = 2022) %>% 
+  select(-GEOID)
+
+worker_class_us <- worker_class_us %>%
+  mutate(class_share = estimate/158913204)
+```
+
+```{r create worker class plot}
+worker_class <- worker_class_GP %>%
+  bind_rows(worker_class_us) %>%
+  filter(variable != "Total Emp.")
+
+worker_class <- worker_class %>% 
+  mutate(variable = case_when(
+    variable %in% c("Federal", "Local Gov.", "State Gov.") ~ "Government",
+    TRUE ~ variable  
+  )) %>% 
+  group_by(NAME, variable) %>%  
+  summarise(estimate = sum(estimate), 
+            class_share = sum(class_share))
+
+worker_class <- worker_class %>%
+  mutate(variable = factor(variable,
+                           levels = c("Private, for-profit", 
+                                      "Private, not-for-profit", 
+                                      "Government","Self Employed")))
+
+ggplot(worker_class, aes(variable, class_share, fill = NAME)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Worker Share by Class in Greater Portland, 2022", 
+       x = "Employment Status", y = "") +
+  scale_y_continuous(labels = scales::percent) +
+  coord_flip() +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+# Occupational Employment and Wages
+(Table of top 10 occupations by employment, w average wage and location quotient)
+
+Note: I used MSA data here because no county-level data is available. Since the MSA boundary is larger than Greater Portland area, there is likely some discrepencies in trends.
+
+```{r load occupation data}
+oes_msa <- read.xlsx("data/OES_Report_MSA.xlsx") %>% 
+  mutate(
+    Occupation = str_extract(`Occupation.(SOC.code)`, "^[^()]+"), 
+    SOC_Code = str_extract(`Occupation.(SOC.code)`, "(?<=\\()\\d+(?=\\))")
+  ) %>% 
+  select (-`Occupation.(SOC.code)`) %>% 
+  filter(!is.na(SOC_Code),
+         !is.na(Occupation))
+
+oes_us <- read.xlsx("data/OES_Report_US.xlsx") %>% 
+  mutate(
+    Occupation = str_extract(`Occupation.(SOC.code)`, "^[^()]+"), 
+    SOC_Code = str_extract(`Occupation.(SOC.code)`, "(?<=\\()\\d+(?=\\))")
+  ) %>% 
+  rename(US_Employment = Employment,
+         US_Hourly.mean.wage = Hourly.mean.wage,
+         US_Annual.mean.wage = Annual.mean.wage)%>% 
+  select (-`Occupation.(SOC.code)`) %>% 
+  filter(!is.na(SOC_Code),
+         !is.na(Occupation))
+
+oes <- oes_msa %>% 
+  left_join(oes_us, by = c("Occupation", "SOC_Code")) %>% 
+  mutate(across(everything(), ~ ifelse(str_detect(.x, "^\\s*-\\s*$"), 0, .x))) %>% 
+  mutate(LQ = (as.numeric(Employment)/1206150)/(as.numeric(US_Employment)/ 151853870)) %>% 
+  filter(SOC_Code != "000000")
+```
+
+Note: The instruction does not state explicitly which SOC level the table should seek to represent, so I created tables for both two-digit major groups and six-digit detailed occupations below. 
+
+## Two-digit major groups
+
+```{r filter to two-digit major groups}
+oes_major <- oes %>% 
+  filter(str_detect(SOC_Code, "^\\d{2}0000$"))
+```
+
+```{r two-digit major group table}
+oes_major_top10 <- oes_major %>% 
+  arrange(desc(as.numeric(Employment))) %>% 
+  slice_head(n = 10) %>% 
+  select(Occupation, Employment, LQ,
+         Hourly.mean.wage, Annual.mean.wage)
+
+kable(
+  oes_major_top10,
+  caption = "Top 10 Major Occupation Groups in Portland-Vancouver-Hillsboro MSA, 2022", 
+  booktabs = TRUE,
+  format = "html" 
+) %>% 
+  kable_styling(latex_options = c("striped", "scale_down"))
+
+```
+
+```{r top ten major occ groups in cleveland dots plot}
+ggplot(oes_major_top10 %>% arrange(desc(as.numeric(Employment))),
+       aes(x = as.numeric(Employment), y = reorder(Occupation, as.numeric(Employment)))) +
+  geom_point(color = "blue", size = 3) +
+  labs(title = "Top 10 Major Occupation Groups in Portland-Vancouver-Hillsboro MSA, 2022",
+       x = "Employment",
+       y = "Occupation"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14),
+    axis.title = element_text(size = 10),
+    axis.text = element_text(size = 8)
+  )+
+  theme(plot.title = element_text(hjust = 1))
+```
+
+## Six-digit detailed occupation
+
+```{r filter to six-digit major groups}
+oes_detailed <- oes %>% 
+  filter(!str_detect(SOC_Code, "^\\d{2}0000$"))
+```
+
+```{r six-digit major group table}
+oes_detailed_top10 <- oes_detailed %>% 
+  arrange(desc(as.numeric(Employment))) %>% 
+  slice_head(n = 10) %>% 
+  select(Occupation, Employment, LQ,
+         Hourly.mean.wage, Annual.mean.wage)
+
+kable(
+  oes_detailed_top10,
+  caption = "Top 10 Detailed Occupations in Portland-Vancouver-Hillsboro MSA, 2022",
+  booktabs = TRUE,
+  format = "html" 
+) %>% 
+  kable_styling(latex_options = c("striped", "scale_down"))
+```
+```{r top ten detailed occ in cleveland dots plot}
+ggplot(oes_detailed_top10 %>% arrange(desc(as.numeric(Employment))),
+       aes(x = as.numeric(Employment), y = reorder(Occupation, as.numeric(Employment)))) +
+  geom_point(color = "blue", size = 3) +
+  labs(
+    title = "Top 10 Detailed Occupations in Portland-Vancouver-Hillsboro MSA, 2022",
+    x = "Employment",
+    y = "Occupation"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14),
+    axis.title = element_text(size = 10),
+    axis.text = element_text(size = 8)
+  )+
+  theme(plot.title = element_text(hjust = 1.2))
+```
+
+# Occupation Trends
+
+Note: Combined the last two prompts into this section for better flow.
+
+## Table of five fastest growing & five most declining occupations
+
+Note: I modified the base year 2019 to 2020 from the origina instructions, since we are using 2022 data instead of 2021. However, we need to address the impact of COVID impact in this case. Therefore, I brought in 2017 data as well, which will give us a five-year cycle.
+
+### Post-pandemic patterns
+
+```{r load 2020 data}
+oes_2020 <- read.xlsx("data/MSA_M2020_dl.xlsx")
+
+oes_2020 <- oes_2020 %>% 
+  filter(str_detect(AREA_TITLE, "Portland")) %>% 
+  select(OCC_CODE,  O_GROUP, TOT_EMP) %>% 
+  rename(SOC_Code = OCC_CODE,
+         Employment20 = TOT_EMP) %>% 
+  mutate(SOC_Code = gsub("-", "", SOC_Code))
+```
+
+#### Post-pandemic major groups
+
+```{r major groups 2020}
+oes_major_20_22 <- oes_major %>% 
+  left_join(oes_2020 %>% filter(O_GROUP == "major"), 
+            by = "SOC_Code") %>% 
+  mutate(Rate_of_Growth = ((as.numeric(Employment) - as.numeric(Employment20))/as.numeric(Employment20)) * 100 )
+
+# Select & categorize table data
+fastest_grow_major_20_22 <- oes_major_20_22 %>%
+  filter(as.numeric(Employment20) >= 500) %>%
+  arrange(desc(Rate_of_Growth)) %>% 
+  slice_head(n = 5)
+
+most_decline_major_20_22 <- oes_major_20_22 %>%
+  filter(as.numeric(Employment20) >= 500) %>%
+  arrange(Rate_of_Growth) %>% 
+  slice_head(n = 5)
+
+combined_major_20_22 <- bind_rows(
+  fastest_grow_major_20_22 %>% mutate(Category = "Top Five Fastest Growing"),
+  most_decline_major_20_22 %>% mutate(Category = "Top Five Most Declining")
+) %>% 
+  select(Occupation, Employment20, Employment, Rate_of_Growth, Category)
+  
+# Create table
+kable(
+  combined_major_20_22,
+  caption = "Top 5 Major Occupation Groups with Greatest Growth and Greatest Decline in Employment Growth (%), Portland-Vancouver-Hillsboro MSA, 2020-2022",
+  booktabs = TRUE,
+  format = "html" 
+) %>% 
+  kable_styling(latex_options = c("striped", "scale_down"))
+```
+
+#### Post-pandemic detailed occupations
+
+```{r detailed occupations 2020}
+oes_detailed_20_22 <- oes_detailed %>% 
+  left_join(oes_2020 %>% filter(O_GROUP == "detailed"), 
+            by = "SOC_Code") %>% 
+  mutate(Rate_of_Growth = ((as.numeric(Employment) - as.numeric(Employment20))/as.numeric(Employment20)) * 100 )
+
+# Select & categorize table data
+fastest_grow_detailed_20_22 <- oes_detailed_20_22 %>%
+  filter(as.numeric(Employment20) >= 500) %>%
+  arrange(desc(Rate_of_Growth)) %>% 
+  slice_head(n = 5)
+
+most_decline_detailed_20_22 <- oes_detailed_20_22 %>% 
+  filter(as.numeric(Employment20) >= 500) %>%
+  arrange(Rate_of_Growth) %>% 
+  slice_head(n = 5)
+
+combined_detailed_20_22 <- bind_rows(
+  fastest_grow_detailed_20_22 %>% mutate(Category = "Top Five Fastest Growing"),
+  most_decline_detailed_20_22 %>% mutate(Category = "Top Five Most Declining")
+) %>% 
+  select(Occupation, Employment20, Employment, Rate_of_Growth, Category)
+  
+# Create table
+kable(
+  combined_detailed_20_22,
+  caption = "Top 5 Detailed Occupations with Greatest Growth/Decline, Portland-Vancouver-Hillsboro MSA, 2020-2022",
+  booktabs = TRUE,
+  format = "html" 
+) %>% 
+  kable_styling(latex_options = c("striped", "scale_down"))
+
+```
+
+### Five-year cycle patterns
+
+Basically a replicate of 2020-2022 comparison using 2017 data.
+
+```{r load 2017 data}
+oes_2017 <- read.xlsx("data/MSA_M2017_dl.xlsx")
+
+oes_2017 <- oes_2017 %>% 
+  filter(str_detect(AREA_NAME, "Portland")) %>% 
+  select(OCC_CODE,  OCC_GROUP, TOT_EMP) %>% 
+  rename(SOC_Code = OCC_CODE,
+         Employment17 = TOT_EMP) %>% 
+  mutate(SOC_Code = gsub("-", "", SOC_Code))
+```
+
+#### Five-year cycle major groups
+
+```{r major groups 2017}
+oes_major_17_22 <- oes_major %>% 
+  left_join(oes_2017 %>% filter(OCC_GROUP == "major"), 
+            by = "SOC_Code") %>% 
+  mutate(Rate_of_Growth = ((as.numeric(Employment) - as.numeric(Employment17))/as.numeric(Employment17)) * 100 )
+
+# Select & categorize table data
+fastest_grow_major_17_22 <- oes_major_17_22 %>% 
+  filter(as.numeric(Employment17) >= 500) %>%
+  arrange(desc(Rate_of_Growth)) %>% 
+  slice_head(n = 5)
+
+most_decline_major_17_22 <- oes_major_17_22 %>% 
+  filter(as.numeric(Employment17) >= 500) %>%
+  arrange(Rate_of_Growth) %>% 
+  slice_head(n = 5)
+
+combined_major_17_22 <- bind_rows(
+  fastest_grow_major_17_22 %>% mutate(Category = "Top Five Fastest Growing"),
+  most_decline_major_17_22 %>% mutate(Category = "Top Five Most Declining")
+) %>% 
+  select(Occupation, Employment17, Employment, Rate_of_Growth, Category)
+  
+# Create table
+kable(
+  combined_major_17_22,
+  caption = "Top 5 Major Occupation Groups with Greatest Growth/Decline, Portland-Vancouver-Hillsboro MSA, 2017-2022",
+  booktabs = TRUE,
+  format = "html" 
+) %>% 
+  kable_styling(latex_options = c("striped", "scale_down"))
+```
+
+#### Five-year cycle detailed occupations
+
+```{r detailed occupations 2017}
+oes_detailed_17_22 <- oes_detailed %>% 
+  left_join(oes_2017 %>% filter(OCC_GROUP == "detailed"), 
+            by = "SOC_Code") %>% 
+  mutate(Rate_of_Growth = ((as.numeric(Employment) - as.numeric(Employment17))/as.numeric(Employment17)) * 100 )
+
+# Select & categorize table data
+fastest_grow_detailed_17_22 <- oes_detailed_17_22 %>% 
+  filter(as.numeric(Employment17) >= 500) %>% 
+  arrange(desc(Rate_of_Growth)) %>% 
+  slice_head(n = 5)
+
+most_decline_detailed_17_22 <- oes_detailed_17_22 %>% 
+  filter(as.numeric(Employment17) >= 500) %>%
+  arrange(Rate_of_Growth) %>% 
+  slice_head(n = 5)
+
+combined_detailed_17_22 <- bind_rows(
+  fastest_grow_detailed_17_22 %>% mutate(Category = "Top Five Fastest Growing"),
+  most_decline_detailed_17_22 %>% mutate(Category = "Top Five Most Declining")
+) %>% 
+  select(Occupation, Employment17, Employment, Rate_of_Growth, Category)
+  
+# Create table
+kable(
+  combined_detailed_17_22,
+  caption = "Top 5 Detailed Occupations with Greatest Growth/Decline, Portland-Vancouver-Hillsboro MSA, 2017-2022",
+  booktabs = TRUE,
+  format = "html" 
+) %>% 
+  kable_styling(latex_options = c("striped", "scale_down"))
+
+```
+
+## Table of regional & national projection of major occupational groups
+
+We used Portland Tri-City occupation projections here since Clark County, WA occupation projections are unavailable.
+
+source: https://qualityinfo.org/web/guest/data (Occupational & Wage Data - Occupational Employment Projections)
+
+```{r load projection data}
+# MSA projections
+projection_GP <- read.xlsx("data/Portland Tri-County Occupational Projections 2022-2032.xlsx")
+
+projection_GP <- projection_GP %>% 
+  filter(SOC.Level == 2) %>% 
+  select(Occupation.Code, Occupation.Title,
+         Employment.2022, Projected.Employment.2032, 
+         Percent.Change) %>% 
+  mutate(Employment.2022 = as.numeric(Employment.2022),
+         Projected.Employment.2032 = as.numeric(Projected.Employment.2032)) %>% 
+  rename(Employment.22 = Employment.2022,
+         P.Employment.32 = Projected.Employment.2032) %>% 
+  mutate(P.Growth.Rate = as.numeric(Percent.Change)*100) %>% 
+  select(-Percent.Change)
+
+# US projections
+projection_US <- read.csv("data/US Employment Projections.csv")
+
+projection_US <- projection_US %>%
+  mutate(
+    Occupation.Code = trimws(Occupation.Code),                      
+    Occupation.Code = gsub("[^0-9-]", "", Occupation.Code),       
+    Occupation.Code = sub("-\\d{4}$", "-0000", Occupation.Code)    
+  )
+
+projection_US <- projection_US %>%
+  mutate(across(c(Employment.2023, Employment.2033), ~ gsub(",", "", .x))) %>% 
+  mutate(across(c(Employment.2023, Employment.2033), ~ as.numeric(.x))) %>%    
+  mutate(across(c(Employment.2023, Employment.2033), ~ .x * 1000))   
+  
+projection_US <- projection_US %>%
+  select(Occupation.Code, 
+         Employment.2023, Employment.2033) %>%
+  mutate(Employment.2023 = as.numeric(Employment.2023),
+         Employment.2033 = as.numeric(Employment.2033)) %>%
+  group_by(Occupation.Code) %>%
+  summarize(Employment.2023 = sum(Employment.2023),
+            Employment.2033 = sum(Employment.2033)) %>%
+  ungroup() %>%
+  mutate(Percent.Change = (Employment.2033 - Employment.2023) / Employment.2033 * 100) %>%
+  rename(US.Employment.23 = Employment.2023,
+         US.P.Employment.33 = Employment.2033,
+         US.P.Growth.Rate = Percent.Change)
+
+# Create table
+GP_us_projection <- projection_GP %>% 
+  full_join(projection_US, by = "Occupation.Code")
+
+kable(
+  GP_us_projection,
+  caption = "Projected Occupation Growth, MSA vs. National, 2022/23 - 2032/33",
+  booktabs = TRUE,
+  format = "html" 
+) %>% 
+  kable_styling(latex_options = c("striped", "scale_down"))
+```
+
+# Extra Credit
+Create a bar chart visualizing the top 10 occupations by employment grouped by
+educational attainment.
+
+The instruction did not specify where to get the data, so I'm assuming we are using the national projection file - the only one I found to contain occupation break down by educational attainment.
+
+```{r}
+major_occ_groups <- projection_GP %>% 
+  select(Occupation.Code, Occupation.Title)
+
+edu_occupation_US <- read.csv("data/US Employment Projections.csv") %>% 
+  select(Occupation.Code, Employment.2023,
+         Typical.Entry.Level.Education) %>% 
+  mutate(
+    Occupation.Code = trimws(Occupation.Code),                      
+    Occupation.Code = gsub("[^0-9-]", "", Occupation.Code),         # Remove unexpected characters
+    Occupation.Code = sub("-\\d{4}$", "-0000", Occupation.Code)) %>%      # Replace last 4 digits with 0000
+  mutate(Employment.2023 = as.numeric(gsub(",", "", Employment.2023))) %>% 
+  left_join(major_occ_groups, by = "Occupation.Code")
+
+# Target top 10 major occupation groups
+top_10_occupation_us <- edu_occupation_US %>% 
+  group_by(Occupation.Code) %>% 
+  summarize(Employment.2023 = sum(Employment.2023)) %>% 
+  arrange(desc(Employment.2023)) %>% 
+  slice_head(n = 10) %>% 
+  select(Occupation.Code)
+
+# Extract top 10 industry education records
+edu_occupation_US <- edu_occupation_US %>% 
+  right_join(top_10_occupation_us, by = "Occupation.Code") %>%  # filter top 10 groups records
+  group_by(Occupation.Title, Typical.Entry.Level.Education) %>% 
+  summarize(Employment.2023 = sum(Employment.2023))
+
+# plot bar chart
+ggplot(edu_occupation_US, aes(x = Occupation.Title, y = Employment.2023, fill = Typical.Entry.Level.Education)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "Education Makeup of the Top 10 Occupation Groups in the US, 2023",
+       y = "Total Employment in 2023 (in thousands)",
+       x = "Major Occupation Group",
+       fill = "Typical Entry Level Education") +
+  coord_flip() +
+  theme_minimal()+
+  theme(plot.title = element_text(hjust = 0.75)) 
+```
